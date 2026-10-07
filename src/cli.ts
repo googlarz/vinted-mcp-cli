@@ -40,7 +40,7 @@ const program = new Command();
 program
   .name('vinted')
   .description('CLI for the Vinted marketplace — search, items, sellers, price compare, trending.')
-  .version('1.6.1')
+  .version('1.6.2')
   .option('--proxy <url>', 'HTTP/HTTPS proxy URL (also: VINTED_PROXY_URL, HTTPS_PROXY)')
   .option('--no-cache', 'disable in-memory response cache (default 60s TTL)')
   .addOption(new Option('--output <fmt>', 'output format').choices(['json', 'table']).default('json'));
@@ -55,6 +55,7 @@ program
   .option('--brand <names>', 'comma-separated brand names (resolved to IDs via Vinted lookup)')
   .option('--category-id <n>', 'category ID', (v) => Number(v))
   .option('--size-ids <ids>', 'comma-separated size IDs', (v) => parseList<string>(v).map(Number))
+  .option('--size <labels>', 'comma-separated size labels (auto-resolved to IDs, e.g. "M,L,XL" or "42,43")')
   .option('--color-ids <ids>', 'comma-separated color IDs', (v) => parseList<string>(v).map(Number))
   .option('--color <names>', 'comma-separated color names (resolved to IDs via Vinted lookup)')
   .option('--condition <list>', 'comma-separated conditions', (v) => parseList<Condition>(v))
@@ -81,6 +82,15 @@ program
           process.stderr.write(`warn: unresolved brand(s): ${r.unresolved.join(', ')}\n`);
         }
       }
+      let sizeIds = o.sizeIds as number[] | undefined;
+      if (!sizeIds && o.size) {
+        const labels = parseList<string>(o.size);
+        const r = await resolveSizeIds(c, labels, o.country as Country);
+        sizeIds = r.ids.length ? r.ids : undefined;
+        if (r.unresolved.length) {
+          process.stderr.write(`warn: unresolved size(s): ${r.unresolved.join(', ')}\n`);
+        }
+      }
       let colorIds = o.colorIds as number[] | undefined;
       if (!colorIds && o.color) {
         const names = parseList<string>(o.color);
@@ -97,7 +107,7 @@ program
         priceMax: o.priceMax,
         brandIds,
         categoryId: o.categoryId,
-        sizeIds: o.sizeIds,
+        sizeIds,
         colorIds,
         condition: o.condition,
         sortBy: o.sort as SortBy,
@@ -189,7 +199,9 @@ program
   .option('--brand <names>', 'comma-separated brand names (resolved to IDs)')
   .option('--category-id <n>', 'category ID', (v) => Number(v))
   .option('--size-ids <ids>', 'comma-separated size IDs', (v) => parseList<string>(v).map(Number))
+  .option('--size <labels>', 'comma-separated size labels (auto-resolved to IDs, e.g. "M,L" or "42,43")')
   .option('--color-ids <ids>', 'comma-separated color IDs', (v) => parseList<string>(v).map(Number))
+  .option('--color <names>', 'comma-separated color names (auto-resolved to IDs)')
   .option('--condition <list>', 'comma-separated conditions', (v) => parseList<Condition>(v))
   .action(async (query: string, o, cmd) => {
     try {
@@ -201,6 +213,18 @@ program
         brandIds = r.ids.length ? r.ids : undefined;
         if (r.unresolved.length) process.stderr.write(`warn: unresolved brand(s): ${r.unresolved.join(', ')}\n`);
       }
+      let sizeIds = o.sizeIds as number[] | undefined;
+      if (!sizeIds && o.size) {
+        const r = await resolveSizeIds(c, parseList<string>(o.size), 'fr');
+        sizeIds = r.ids.length ? r.ids : undefined;
+        if (r.unresolved.length) process.stderr.write(`warn: unresolved size(s): ${r.unresolved.join(', ')}\n`);
+      }
+      let colorIds = o.colorIds as number[] | undefined;
+      if (!colorIds && o.color) {
+        const r = await resolveColorIds(c, parseList<string>(o.color), 'fr');
+        colorIds = r.ids.length ? r.ids : undefined;
+        if (r.unresolved.length) process.stderr.write(`warn: unresolved color(s): ${r.unresolved.join(', ')}\n`);
+      }
       const countries = o.allCountries ? ([...COUNTRIES] as Country[]) : (o.countries ?? ['fr', 'de', 'it', 'es', 'nl', 'pl'] as Country[]);
       const r = await opCompare(c, {
         query,
@@ -208,8 +232,8 @@ program
         limit: o.limit,
         brandIds,
         categoryId: o.categoryId,
-        sizeIds: o.sizeIds,
-        colorIds: o.colorIds,
+        sizeIds,
+        colorIds,
         condition: o.condition,
       });
       out(r, g.output);

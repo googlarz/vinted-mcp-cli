@@ -19,7 +19,7 @@ import { opCategories } from './ops/categories.js';
 import { opSellerItems } from './ops/seller-items.js';
 import { opGetSellerFeedback } from './ops/get-seller-feedback.js';
 import { opSearchAll } from './ops/search.js';
-import { opGetColors } from './ops/get-colors.js';
+import { opGetColors, resolveColorIds } from './ops/get-colors.js';
 import { opGetSizeGroups } from './ops/get-size-groups.js';
 import { resolveSizeIds } from './ops/sizes.js';
 
@@ -37,8 +37,10 @@ const TOOLS = [
         brandIds: { type: 'array', items: { type: 'integer' }, description: 'Numeric Vinted brand IDs from search_brands. Prefer the brand[] parameter for name-based lookup.' },
         brand: { type: 'array', items: { type: 'string' }, description: 'Brand names to filter by, e.g. ["Nike", "Adidas"]. Automatically resolved to IDs via search_brands.' },
         categoryId: { type: 'integer', description: 'Category ID from get_categories (e.g. 4 = women\'s clothing, 5 = men\'s clothing, 1231 = women\'s shoes)' },
-        sizeIds: { type: 'array', items: { type: 'integer' }, description: 'Size IDs to filter by. Discover valid IDs by inspecting results from a previous search in the same category, or use get_size_groups to browse all size groups.' },
-        colorIds: { type: 'array', items: { type: 'integer' }, description: 'Color IDs to filter by (e.g. [1] for black, [3] for white). Use get_colors to discover all available color IDs and their names.' },
+        sizeIds: { type: 'array', items: { type: 'integer' }, description: 'Numeric size IDs. Prefer the size[] parameter for label-based lookup.' },
+        size: { type: 'array', items: { type: 'string' }, description: 'Size labels to filter by, e.g. ["M", "L"] or ["42", "43"]. Automatically resolved to IDs via resolve_size_ids. Use instead of sizeIds when you know the label but not the ID.' },
+        colorIds: { type: 'array', items: { type: 'integer' }, description: 'Numeric color IDs. Prefer the color[] parameter for name-based lookup.' },
+        color: { type: 'array', items: { type: 'string' }, description: 'Color names to filter by, e.g. ["black", "white"]. Automatically resolved to IDs via get_colors.' },
         condition: { type: 'array', items: { type: 'string', enum: ['new_with_tags', 'new_without_tags', 'very_good', 'good', 'satisfactory'] }, description: 'Item condition filter; multiple values are OR-ed together' },
         sortBy: { type: 'string', enum: ['relevance', 'price_low_to_high', 'price_high_to_low', 'newest_first'], description: 'Sort order for results. Defaults to relevance.' },
         perPage: { type: 'integer', description: 'Results per page, 1–96. Defaults to 20.' },
@@ -144,8 +146,10 @@ const TOOLS = [
         brandIds: { type: 'array', items: { type: 'integer' }, description: 'Numeric brand IDs from search_brands' },
         brand: { type: 'array', items: { type: 'string' }, description: 'Brand names; automatically resolved to IDs' },
         categoryId: { type: 'integer', description: 'Category ID from get_categories' },
-        sizeIds: { type: 'array', items: { type: 'integer' }, description: 'Size IDs to filter by' },
-        colorIds: { type: 'array', items: { type: 'integer' }, description: 'Color IDs to filter by. Use get_colors to discover all available color IDs.' },
+        sizeIds: { type: 'array', items: { type: 'integer' }, description: 'Numeric size IDs. Prefer size[] for label-based lookup.' },
+        size: { type: 'array', items: { type: 'string' }, description: 'Size labels to filter by, e.g. ["M", "L"]. Automatically resolved to IDs.' },
+        colorIds: { type: 'array', items: { type: 'integer' }, description: 'Numeric color IDs. Prefer color[] for name-based lookup.' },
+        color: { type: 'array', items: { type: 'string' }, description: 'Color names to filter by, e.g. ["black", "white"]. Automatically resolved to IDs.' },
         condition: { type: 'array', items: { type: 'string', enum: ['new_with_tags', 'new_without_tags', 'very_good', 'good', 'satisfactory'] }, description: 'Item condition filter' },
         sortBy: { type: 'string', enum: ['relevance', 'price_low_to_high', 'price_high_to_low', 'newest_first'], description: 'Sort order' },
         maxItems: { type: 'integer', default: 200, description: 'Maximum total items to collect across all pages (default 200, max 1000)' },
@@ -186,6 +190,18 @@ const TOOLS = [
       properties: {
         country: { type: 'string', enum: COUNTRIES, default: 'fr', description: 'Vinted country site to query (size catalogues are shared across countries)' },
       },
+    },
+  },
+  {
+    name: 'resolve_color_ids',
+    description: 'Resolve color names (e.g. "black", "white", "navy") to numeric Vinted color IDs for use in search_items.colorIds and search_all_items.colorIds. Matching is case-insensitive and also works with Vinted\'s internal color codes (e.g. "BLACK", "NAVY_BLUE"). Alternatively, pass color names directly to search_items.color[] and they will be resolved automatically.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        colors: { type: 'array', items: { type: 'string' }, description: 'Color names to resolve, e.g. ["black", "white", "navy"]' },
+        country: { type: 'string', enum: COUNTRIES, default: 'fr', description: 'Vinted country site to query (color catalogues are shared across countries)' },
+      },
+      required: ['colors'],
     },
   },
   {
@@ -275,7 +291,7 @@ const PROMPTS = [
 
 function makeServer(sharedClient?: VintedClient): Server {
   const server = new Server(
-    { name: 'vinted-cli', version: '1.6.1' },
+    { name: 'vinted-cli', version: '1.6.2' },
     { capabilities: { tools: {}, prompts: {} } },
   );
 
@@ -354,6 +370,14 @@ function makeServer(sharedClient?: VintedClient): Server {
             const r = await resolveBrandIds(c, args.brand, args.country);
             args.brandIds = r.ids.length ? r.ids : undefined;
           }
+          if (!args.sizeIds && Array.isArray(args.size) && args.size.length) {
+            const r = await resolveSizeIds(c, args.size, args.country);
+            args.sizeIds = r.ids.length ? r.ids : undefined;
+          }
+          if (!args.colorIds && Array.isArray(args.color) && args.color.length) {
+            const r = await resolveColorIds(c, args.color, args.country);
+            args.colorIds = r.ids.length ? r.ids : undefined;
+          }
           result = await opSearch(c, args);
           break;
         }
@@ -378,12 +402,25 @@ function makeServer(sharedClient?: VintedClient): Server {
             const r = await resolveBrandIds(c, args.brand, args.country);
             args.brandIds = r.ids.length ? r.ids : undefined;
           }
+          if (!args.sizeIds && Array.isArray(args.size) && args.size.length) {
+            const r = await resolveSizeIds(c, args.size, args.country);
+            args.sizeIds = r.ids.length ? r.ids : undefined;
+          }
+          if (!args.colorIds && Array.isArray(args.color) && args.color.length) {
+            const r = await resolveColorIds(c, args.color, args.country);
+            args.colorIds = r.ids.length ? r.ids : undefined;
+          }
           result = await opSearchAll(c, { ...args, maxItems: args.maxItems ?? 200 });
           break;
         }
         case 'get_seller_feedback': result = await opGetSellerFeedback(c, a as any); break;
         case 'get_colors': result = await opGetColors(c, a as any); break;
         case 'get_size_groups': result = await opGetSizeGroups(c, a as any); break;
+        case 'resolve_color_ids': {
+          const args = a as any;
+          result = await resolveColorIds(c, args.colors ?? [], args.country);
+          break;
+        }
         case 'resolve_size_ids': {
           const args = a as any;
           result = await resolveSizeIds(c, args.sizes ?? [], args.country);
@@ -396,12 +433,12 @@ function makeServer(sharedClient?: VintedClient): Server {
             args.brandIds = r.ids.length ? r.ids : undefined;
           }
           const sinceMs = Date.now() - (args.sinceMinutes ?? 60) * 60_000;
-          const today = new Date().toISOString().split('T')[0];
+          const dateFrom = new Date(sinceMs).toISOString().split('T')[0];
           const r = await opSearch(c, {
             ...args,
             sortBy: 'newest_first',
             perPage: args.perPage ?? 50,
-            dateFrom: today,
+            dateFrom,
           });
           const items = r.items.filter((i: any) => {
             if (!i.createdAt) return true;
