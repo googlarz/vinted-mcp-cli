@@ -1,24 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { opCompare } from '../dist/ops/compare.js';
+import { catalogEntry, catalogHtml, CatalogClient } from './helpers/catalog-html.mjs';
 
-class StubClient {
-  constructor(pricesByCountry) { this.pricesByCountry = pricesByCountry; }
-  async apiGet(country, path) {
-    const prices = this.pricesByCountry[country] ?? [];
-    return {
-      items: prices.map((p, i) => ({
-        id: i + 1, title: `t${i}`,
-        price: { amount: String(p), currency_code: 'EUR' },
-        user: { id: i + 1, login: `u${i}` },
-      })),
-      pagination: { total_entries: prices.length },
-    };
-  }
+function StubClient(pricesByCountry, failing = {}) {
+  return new CatalogClient((country) => {
+    if (failing[country]) return new Error(failing[country]);
+    const prices = pricesByCountry[country] ?? [];
+    return catalogHtml(prices.map((p, i) => catalogEntry({ id: i + 1, price: String(p) })));
+  });
 }
 
 test('opCompare computes median, spread, best buy/sell', async () => {
-  const c = new StubClient({
+  const c = StubClient({
     fr: [10, 20, 30],
     de: [50, 60, 70],
     it: [25, 25, 25],
@@ -36,14 +30,14 @@ test('opCompare computes median, spread, best buy/sell', async () => {
 });
 
 test('opCompare drops countries with no items', async () => {
-  const c = new StubClient({ fr: [10], de: [] });
+  const c = StubClient({ fr: [10], de: [] });
   const r = await opCompare(c, { query: 'x', countries: ['fr', 'de'] });
   assert.equal(r.countries.length, 1);
   assert.equal(r.countries[0].country, 'fr');
 });
 
 test('opCompare returns empty when nothing found', async () => {
-  const c = new StubClient({});
+  const c = StubClient({});
   const r = await opCompare(c, { query: 'x', countries: ['fr'] });
   assert.equal(r.countries.length, 0);
   assert.equal(r.bestBuyCountry, null);
@@ -51,5 +45,38 @@ test('opCompare returns empty when nothing found', async () => {
 });
 
 test('opCompare validates query', async () => {
-  await assert.rejects(() => opCompare(new StubClient({}), { query: '   ' }), /query is required/);
+  await assert.rejects(() => opCompare(StubClient({}), { query: '   ' }), /query is required/);
+});
+
+test('opCompare reports failed countries instead of hiding them', async () => {
+  const c = StubClient({ fr: [10, 20] }, { de: 'Vinted 429 for x' });
+  const r = await opCompare(c, { query: 'x', countries: ['fr', 'de'] });
+  assert.equal(r.countries.length, 1);
+  assert.deepEqual(r.failed, [{ country: 'de', error: 'Vinted 429 for x' }]);
+});
+
+test('opCompare reports failures even when every country failed', async () => {
+  const c = StubClient({}, { fr: 'down' });
+  const r = await opCompare(c, { query: 'x', countries: ['fr'] });
+  assert.equal(r.countries.length, 0);
+  assert.equal(r.failed.length, 1);
+});
+
+test('opCompare omits failed when all countries succeed', async () => {
+  const r = await opCompare(StubClient({ fr: [10] }), { query: 'x', countries: ['fr'] });
+  assert.equal('failed' in r, false);
+});
+
+test('opCompare rejects unknown countries and dedupes repeats', async () => {
+  await assert.rejects(() => opCompare(StubClient({}), { query: 'x', countries: ['fr', 'zz'] }), /Unknown country: zz/);
+  const c = StubClient({ fr: [10] });
+  await opCompare(c, { query: 'x', countries: ['fr', 'fr', 'fr'] });
+  assert.equal(c.calls.length, 1);
+});
+
+test('opCompare clamps limit to 96', async () => {
+  const entries = Array.from({ length: 96 }, (_, i) => catalogEntry({ id: i + 1, price: '5' }));
+  const c = new CatalogClient(() => catalogHtml(entries));
+  const r = await opCompare(c, { query: 'x', countries: ['fr'], limit: 100000 });
+  assert.equal(r.countries[0].itemCount, 96);
 });

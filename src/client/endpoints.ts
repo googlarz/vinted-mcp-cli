@@ -3,54 +3,23 @@ import {
   type Country, type Item, type ItemDetail, type SearchParams, type SearchResult, type Seller, type CategoryHit,
 } from './types.js';
 import { VintedClient } from './session.js';
-
-function buildSearchPath(p: SearchParams): string {
-  const qs = new URLSearchParams();
-  qs.set('search_text', p.query);
-  qs.set('page', String(p.page ?? 1));
-  qs.set('per_page', String(Math.min(p.perPage ?? 20, 100)));
-  qs.set('order', SORT_VALUE[p.sortBy ?? 'relevance']);
-  if (p.priceMin !== undefined) qs.set('price_from', String(p.priceMin));
-  if (p.priceMax !== undefined) qs.set('price_to', String(p.priceMax));
-  if (p.categoryId) qs.set('catalog_ids', String(p.categoryId));
-  if (p.brandIds?.length) qs.set('brand_ids', p.brandIds.join(','));
-  if (p.sizeIds?.length) qs.set('size_ids', p.sizeIds.join(','));
-  if (p.colorIds?.length) qs.set('color_ids', p.colorIds.join(','));
-  if (p.condition?.length) {
-    qs.set('status_ids', p.condition.map((c) => CONDITION_ID[c]).join(','));
-  }
-  if (p.dateFrom) qs.set('date_from', new Date(p.dateFrom).toISOString());
-  if (p.dateTo) qs.set('date_to', new Date(p.dateTo).toISOString());
-  return `/api/v2/catalog/items?${qs.toString()}`;
-}
+import { buildCatalogPath, parseCatalogHtml, mapCatalogItem, CATALOG_PAGE_SIZE } from './catalog-html.js';
 
 export async function searchItems(client: VintedClient, p: SearchParams): Promise<SearchResult> {
+  if ((p as { dateFrom?: string }).dateFrom || (p as { dateTo?: string }).dateTo) {
+    throw new Error(
+      'dateFrom/dateTo are not supported: the Vinted catalog no longer exposes a date filter. ' +
+      'Use sortBy "newest_first" and compare item IDs instead (see get_new_items afterId).',
+    );
+  }
   const country = p.country ?? 'fr';
-  const data = await client.apiGet<{
-    items: any[];
-    pagination?: { total_entries?: number };
-  }>(country, buildSearchPath(p));
-
-  const items: Item[] = (data.items ?? []).map((i) => ({
-    id: Number(i.id),
-    title: String(i.title ?? ''),
-    price: String(i.price?.amount ?? i.price ?? ''),
-    currency: String(i.price?.currency_code ?? i.currency ?? ''),
-    brand: i.brand_title ?? i.brand,
-    size: i.size_title ?? i.size,
-    condition: i.status,
-    url: i.url ?? `https://${DOMAIN[country]}/items/${i.id}`,
-    favouriteCount: i.favourite_count,
-    photoUrl: i.photo?.url ?? i.photos?.[0]?.url,
-    seller: {
-      id: Number(i.user?.id ?? 0),
-      username: String(i.user?.login ?? i.user?.username ?? ''),
-    },
-  }));
-
+  const page = await client.pageGet(country, buildCatalogPath(p), parseCatalogHtml, p.noCache ? 0 : undefined);
+  // Vinted serves fixed 96-item pages; perPage can only truncate.
+  const limit = Math.min(Math.max(Math.trunc(p.perPage ?? 20) || 20, 1), CATALOG_PAGE_SIZE);
+  const items = page.items.slice(0, limit).map((e) => mapCatalogItem(e, country));
   return {
-    totalCount: data.pagination?.total_entries ?? items.length,
-    page: p.page ?? 1,
+    totalCount: page.pagination.totalEntries,
+    page: p.page ?? page.pagination.currentPage,
     items,
   };
 }
@@ -106,10 +75,17 @@ async function getItemFromHtml(
   // Scrape seller id + username from member links in HTML
   let sellerUsername = '';
   let sellerId = 0;
-  const sellerMatch = body.match(/\/member\/(\d+)-([^"'/?&#\s]+)/);
+  const sellerMatch = body.match(/\/member\/(\d+)(?:-([^"'/?&#\s]+))?/);
   if (sellerMatch) {
     sellerId = Number(sellerMatch[1]);
-    sellerUsername = sellerMatch[2];
+    sellerUsername = sellerMatch[2] ?? '';
+    if (!sellerUsername) {
+      try {
+        sellerUsername = (await getSeller(client, sellerId, country)).username;
+      } catch {
+        // username is a nicety; the id alone is still useful
+      }
+    }
   }
 
   return {
@@ -210,13 +186,12 @@ export async function getSellerItems(
   page = 1,
 ): Promise<SearchResult> {
   const qs = new URLSearchParams();
-  qs.set('seller_id', String(sellerId));
   qs.set('per_page', String(Math.min(perPage, 100)));
   qs.set('page', String(page));
   qs.set('order', 'newest_first');
   const data = await client.apiGet<{ items: any[]; pagination?: { total_entries?: number } }>(
     country,
-    `/api/v2/catalog/items?${qs.toString()}`,
+    `/api/v2/wardrobe/${sellerId}/items?${qs.toString()}`,
   );
   const items: Item[] = (data.items ?? []).map((i) => ({
     id: Number(i.id),

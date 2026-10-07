@@ -50,7 +50,7 @@ npm install -g @googlarz/vinted-client
 Or run without installing:
 
 ```bash
-npx @googlarz/vinted-client search "levis 501"
+npx -y -p @googlarz/vinted-client vinted search "levis 501"
 ```
 
 ---
@@ -71,7 +71,7 @@ vinted search "adidas samba" \
   --condition new_with_tags,very_good \
   --output table
 
-# Watch for new listings every 30s
+# Watch for new listings every 30s (minimum 5)
 vinted search "air jordan 1" --watch 30
 
 # Walk all pages and collect up to 500 results
@@ -97,8 +97,9 @@ vinted brands "stone island"
 # What's trending right now
 vinted trending --country fr --output table
 
-# Resolve size labels to IDs, then use in search
+# Resolve size labels to IDs, or let search do it for you
 vinted sizes M L XL --country de
+vinted search "levi 501" --size M,L
 vinted search "levi 501" --size-ids 206,207,208
 
 # Filter by color (name auto-resolved)
@@ -133,7 +134,7 @@ vinted size-groups --output table
 | `size-groups` | List all size groups with IDs |
 | `sizes <labels...>` | Resolve size labels ("M", "42") to numeric IDs |
 | `trending` | Newest / trending listings |
-| `debug` | Inspect session cookies (for troubleshooting) |
+| `debug` | Inspect session cookie names (`--show-cookie` to print values) |
 
 ### Global flags
 
@@ -152,15 +153,17 @@ vinted size-groups --output table
 | `--brand <names>` | Brand names (auto-resolved to IDs) |
 | `--brand-ids <ids>` | Comma-separated brand IDs |
 | `--category-id <n>` | Category ID (`vinted categories` to browse) |
+| `--size <labels>` | Size labels (auto-resolved to IDs, e.g. `--size M,L` or `--size 42,43`) |
 | `--size-ids <ids>` | Comma-separated size IDs (`vinted sizes M L` to resolve) |
 | `--color-ids <ids>` | Comma-separated color IDs (`vinted colors` to browse) |
 | `--color <names>` | Color names (auto-resolved to IDs, e.g. `--color black,white`) |
 | `--condition <list>` | `new_with_tags`, `new_without_tags`, `very_good`, `good`, `satisfactory` |
 | `--sort <s>` | `relevance`, `price_low_to_high`, `price_high_to_low`, `newest_first` |
-| `--date-from / --date-to` | Date range filter (YYYY-MM-DD) |
 | `--all` | Walk pages and collect all results |
 | `--max-items <n>` | Cap for `--all` (default 1000) |
-| `--watch [interval]` | Poll every N seconds for new listings (default 60s) |
+| `--watch [interval]` | Poll every N seconds for new listings (default 60s, minimum 5s) |
+
+> **Result limits.** Vinted serves search results in fixed pages of 96, so `--limit` only truncates a page, and at most 960 results are reachable per query. Search results carry the listing's brand, size and condition as Vinted displays them (localised to the country site, e.g. "Très bon état") and the seller's numeric ID but not the username — use `vinted item <id>` or `vinted seller <id>` for that. Vinted's catalog has no date filter, so there is no `--date-from/--date-to`; use `--sort newest_first`.
 
 ---
 
@@ -183,7 +186,7 @@ Add to `claude_desktop_config.json`:
   "mcpServers": {
     "vinted": {
       "command": "npx",
-      "args": ["-y", "@googlarz/vinted-client/mcp"]
+      "args": ["-y", "-p", "@googlarz/vinted-client", "vinted-mcp"]
     }
   }
 }
@@ -192,16 +195,16 @@ Add to `claude_desktop_config.json`:
 ### Setup — Claude Code
 
 ```bash
-claude mcp add vinted -- npx -y @googlarz/vinted-client/mcp
+claude mcp add vinted -- npx -y -p @googlarz/vinted-client vinted-mcp
 ```
 
 ### MCP Tools
 
 | Tool | Description |
 |---|---|
-| `search_items` | Search with full filter support (brand, size, color, condition, price, dates) |
+| `search_items` | Search with full filter support (brand, size, color, condition, price) |
 | `search_all_items` | Like `search_items` but auto-paginates and returns all results |
-| `get_new_items` | Poll for newly listed items in the last N minutes |
+| `get_new_items` | Newest listings for a query; pass the previous `latestId` as `afterId` to get only what is new |
 | `get_item` | Item detail by ID or URL |
 | `get_seller` | Seller profile |
 | `get_seller_items` | Active listings for a seller |
@@ -213,6 +216,20 @@ claude mcp add vinted -- npx -y @googlarz/vinted-client/mcp
 | `get_colors` | All color options with hex codes and IDs |
 | `get_size_groups` | All size groups with IDs (Women's, Men's, Shoes, Kids…) |
 | `resolve_size_ids` | Resolve size labels ("M", "42", "XL") to numeric filter IDs |
+| `resolve_color_ids` | Resolve color names ("black", "navy blue") to numeric filter IDs |
+
+Brand, size and color names passed to `search_items`, `search_all_items`, `get_new_items` and `compare_prices` are resolved automatically. If none of the names resolve the call fails (rather than silently searching unfiltered); if only some do, the result includes a `warnings` array. Browser mode for `get_item` is not available to MCP callers — the server operator enables it with `VINTED_BROWSER=1`.
+
+### MCP over HTTP
+
+By default the server speaks stdio. For a network transport:
+
+```bash
+VINTED_MCP_TRANSPORT=http VINTED_MCP_TOKEN=choose-a-long-random-secret npx -y -p @googlarz/vinted-client vinted-mcp
+# listens on http://127.0.0.1:3001/mcp — send `Authorization: Bearer <token>`
+```
+
+Without `VINTED_MCP_TOKEN` the server only accepts loopback `Host` headers and rejects browser (`Origin`) requests, and it refuses to bind to a non-loopback `VINTED_MCP_HOST`. Set a token whenever the port is reachable by anything you don't fully trust.
 
 ### MCP Prompts
 
@@ -240,7 +257,7 @@ Built-in prompt templates for common workflows — use them from any MCP-compati
 ## Library Usage
 
 ```typescript
-import { VintedClient, opSearch, opCompare, opSearchAll } from '@googlarz/vinted-client';
+import { VintedClient, opSearch, opCompare, opSearchAll, opGetNewItems } from '@googlarz/vinted-client';
 
 const client = new VintedClient();
 
@@ -262,11 +279,16 @@ const all = await opSearchAll(client, {
   maxItems: 300,
 });
 
-// Multi-country price comparison
+// Multi-country price comparison (report.failed lists countries that errored)
 const report = await opCompare(client, {
   query: 'air jordan 1 retro',
   countries: ['fr', 'de', 'uk', 'it'],
 });
+
+// Poll for new listings: keep the cursor between calls
+let cursor: number | undefined;
+const fresh = await opGetNewItems(client, { query: 'air jordan 1', country: 'fr', afterId: cursor });
+cursor = fresh.latestId ?? cursor;
 ```
 
 ### Client options
@@ -287,11 +309,11 @@ const client = new VintedClient({
 
 Vinted has no public API. This library:
 
-1. **Bootstraps a session** by hitting `vinted.{cc}/catalog` and capturing the auth cookies the Vinted frontend sets.
-2. **Calls the private JSON API** (`/api/v2/...`) with those cookies, mimicking browser request headers.
+1. **Bootstraps a session** by hitting `vinted.{cc}/catalog` and capturing the auth cookies the Vinted frontend sets (one bootstrap per country, shared by concurrent requests).
+2. **Reads search results from the catalog page.** Vinted removed its JSON catalog endpoint; the server-rendered `/catalog` page embeds the result list in its Next.js payload, which is parsed here. Sellers, feedback, brands, colors and sizes still come from the private JSON API (`/api/v2/...`).
 3. **Re-bootstraps automatically** on 401 — tokens expire, the library recovers silently.
 4. **Rate-limits per country** with a token bucket (configurable burst + refill) to avoid 429s.
-5. **Caches responses** with LRU+TTL — 60s for search results, 1h for static data like categories.
+5. **Caches responses** with LRU+TTL — 60s for search results, 1h for static data like categories (kept in a separate cache so searches cannot evict it). Identical concurrent requests share one network call.
 6. **Falls back to HTML scraping** for item pages blocked by DataDome (JSON-LD + regex extraction).
 7. **Prefetches 3 pages concurrently** in `opSearchAll` to maximise throughput within the rate-limit budget.
 
@@ -319,7 +341,10 @@ Standard `HTTPS_PROXY` / `HTTP_PROXY` env vars are also respected.
 | `VINTED_CACHE_TTL_MS` | Cache TTL in ms (default `60000`) |
 | `VINTED_RATE_LIMIT_PER_SEC` | Requests per second per country (default `3`) |
 | `VINTED_RATE_LIMIT_BURST` | Token bucket burst size (default `6`) |
-| `VINTED_BROWSER` | Set to `1` to use stealth browser for item detail |
+| `VINTED_BROWSER` | Set to `1` to use stealth browser for item detail (at most 2 browsers run at once) |
+| `VINTED_MCP_TRANSPORT` | `http` to serve MCP over HTTP instead of stdio |
+| `VINTED_MCP_TOKEN` | Bearer token required by the HTTP transport (mandatory for non-loopback hosts) |
+| `VINTED_MCP_HOST` / `VINTED_MCP_PORT` / `VINTED_MCP_PATH` | HTTP bind address (default `127.0.0.1`), port (`3001`) and path (`/mcp`) |
 
 ---
 

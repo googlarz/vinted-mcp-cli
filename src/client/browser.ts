@@ -36,11 +36,32 @@ async function loadStealthChromium() {
   throw new Error(MISSING_DEPS_MSG);
 }
 
-export async function fetchItemDetailsViaBrowser(
+const MAX_BROWSERS = 2;
+let activeBrowsers = 0;
+const slotWaiters: Array<() => void> = [];
+
+// Each call launches Chromium; cap how many run at once. A finishing call hands its slot straight to the next waiter.
+async function withBrowserSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (activeBrowsers >= MAX_BROWSERS) await new Promise<void>((resolve) => slotWaiters.push(resolve));
+  else activeBrowsers++;
+  try {
+    return await fn();
+  } finally {
+    const next = slotWaiters.shift();
+    if (next) next();
+    else activeBrowsers--;
+  }
+}
+
+export function fetchItemDetailsViaBrowser(
   itemId: number,
   country: Country = 'fr',
   opts: BrowserOptions = {},
 ): Promise<any> {
+  return withBrowserSlot(() => launchAndFetch(itemId, country, opts));
+}
+
+async function launchAndFetch(itemId: number, country: Country, opts: BrowserOptions): Promise<any> {
   const chromium = await loadStealthChromium();
   const proxyUrl = opts.proxyUrl ?? process.env.VINTED_PROXY_URL ?? process.env.HTTPS_PROXY ?? process.env.HTTP_PROXY;
   const proxy = proxyUrl ? toPlaywrightProxy(proxyUrl) : undefined;

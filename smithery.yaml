@@ -6,6 +6,7 @@ startCommand:
       proxyUrl:
         type: string
         title: Proxy URL
+        format: password
         description: >
           HTTP/HTTPS proxy URL for countries where Vinted blocks direct connections
           (e.g. some residential IPs). Also readable from the VINTED_PROXY_URL env var.
@@ -20,7 +21,7 @@ startCommand:
   commandFunction: |-
     (config) => ({
       command: "npx",
-      args: ["-y", "@googlarz/vinted-client/mcp"],
+      args: ["-y", "-p", "@googlarz/vinted-client", "vinted-mcp"],
       env: {
         ...(config.proxyUrl ? { VINTED_PROXY_URL: config.proxyUrl } : {}),
         ...(config.cacheTtlMs !== undefined ? { VINTED_CACHE_TTL_MS: String(config.cacheTtlMs) } : {}),

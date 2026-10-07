@@ -47,8 +47,8 @@ export interface SearchParams {
   sortBy?: SortBy;
   perPage?: number;
   page?: number;
-  dateFrom?: string;  // ISO date e.g. "2024-01-01"
-  dateTo?: string;
+  /** Skip the response cache (used when polling for fresh listings). */
+  noCache?: boolean;
 }
 
 export interface Item {

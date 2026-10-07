@@ -9,19 +9,9 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { VintedClient } from './client/session.js';
 import { COUNTRIES } from './client/types.js';
-import { opSearch } from './ops/search.js';
-import { opGetItem } from './ops/get-item.js';
-import { opGetSeller } from './ops/get-seller.js';
-import { opCompare } from './ops/compare.js';
-import { opTrending } from './ops/trending.js';
-import { opBrands, resolveBrandIds } from './ops/brands.js';
-import { opCategories } from './ops/categories.js';
-import { opSellerItems } from './ops/seller-items.js';
-import { opGetSellerFeedback } from './ops/get-seller-feedback.js';
-import { opSearchAll } from './ops/search.js';
-import { opGetColors, resolveColorIds } from './ops/get-colors.js';
-import { opGetSizeGroups } from './ops/get-size-groups.js';
-import { resolveSizeIds } from './ops/sizes.js';
+import { createHash, timingSafeEqual } from 'node:crypto';
+import { callTool } from './dispatch.js';
+import { VERSION } from './version.js';
 
 const TOOLS = [
   {
@@ -31,7 +21,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         query: { type: 'string', description: 'Search keywords, e.g. "Nike Air Max 90" or "levi 501 jeans"' },
-        country: { type: 'string', enum: COUNTRIES, default: 'fr', description: 'Vinted country site to search (fr, de, uk, pl, es, nl, be, it, pt, cz, sk, hu, ro, lt, lv, ee, fi, at, se)' },
+        country: { type: 'string', enum: COUNTRIES, default: 'fr', description: 'Vinted country site to search (fr, de, uk, it, es, nl, pl, pt, be, at, lt, cz, sk, hu, ro, hr, fi, dk, se)' },
         priceMin: { type: 'number', description: 'Minimum price in the local currency of the selected country' },
         priceMax: { type: 'number', description: 'Maximum price in the local currency of the selected country' },
         brandIds: { type: 'array', items: { type: 'integer' }, description: 'Numeric Vinted brand IDs from search_brands. Prefer the brand[] parameter for name-based lookup.' },
@@ -43,10 +33,8 @@ const TOOLS = [
         color: { type: 'array', items: { type: 'string' }, description: 'Color names to filter by, e.g. ["black", "white"]. Automatically resolved to IDs via get_colors.' },
         condition: { type: 'array', items: { type: 'string', enum: ['new_with_tags', 'new_without_tags', 'very_good', 'good', 'satisfactory'] }, description: 'Item condition filter; multiple values are OR-ed together' },
         sortBy: { type: 'string', enum: ['relevance', 'price_low_to_high', 'price_high_to_low', 'newest_first'], description: 'Sort order for results. Defaults to relevance.' },
-        perPage: { type: 'integer', description: 'Results per page, 1–96. Defaults to 20.' },
+        perPage: { type: 'integer', description: 'Results to return, 1–96. Defaults to 20. Vinted serves fixed pages of 96, so this only truncates a page; at most 960 results are reachable per query.' },
         page: { type: 'integer', description: 'Page number starting at 1' },
-        dateFrom: { type: 'string', description: 'Return items listed on or after this date. ISO-8601 format, e.g. "2024-01-01"' },
-        dateTo: { type: 'string', description: 'Return items listed on or before this date. ISO-8601 format, e.g. "2024-12-31"' },
       },
       required: ['query'],
     },
@@ -60,7 +48,6 @@ const TOOLS = [
         itemId: { type: 'integer', description: 'Numeric Vinted item ID, e.g. 5678901234' },
         url: { type: 'string', description: 'Full Vinted item URL, e.g. "https://www.vinted.fr/items/5678901234-nike-air-max". Country is inferred from the URL automatically.' },
         country: { type: 'string', enum: COUNTRIES, description: 'Country site (required when using itemId; inferred automatically when url is provided)' },
-        browser: { type: 'boolean', default: false, description: 'Use headless browser for retrieval. Requires optional Playwright deps; only needed for items blocked by bot detection.' },
       },
     },
   },
@@ -218,18 +205,20 @@ const TOOLS = [
   },
   {
     name: 'get_new_items',
-    description: 'Fetch the most recently listed items for a search query, optionally filtered to those posted within the last N minutes. Use this to monitor a search and detect new listings — call it repeatedly with the same query to get fresh arrivals. Items are sorted newest-first. Supports the same filters as search_items (brand, category, size, color, price, condition).',
+    description: 'Fetch the most recently listed items for a search query (newest first). To monitor a search, call it repeatedly and pass the previous response\'s latestId as afterId — only items listed since then are returned (truncated: true means more than perPage arrived; raise perPage or poll more often). Supports the same filters as search_items (brand, category, size, color, price, condition).',
     inputSchema: {
       type: 'object',
       properties: {
         query: { type: 'string', description: 'Search keywords to monitor, e.g. "Nike Air Max 90 size 42"' },
         country: { type: 'string', enum: COUNTRIES, default: 'fr', description: 'Vinted country site to monitor' },
-        sinceMinutes: { type: 'integer', default: 60, description: 'Return only items listed in the last N minutes (approximate — Vinted date filters are day-granular; sub-hour filtering applied client-side on createdAt when available). Default 60.' },
-        perPage: { type: 'integer', default: 50, description: 'Number of items to fetch before applying the time filter, 1–96' },
+        afterId: { type: 'integer', description: 'Return only items with an ID greater than this (use latestId from the previous call). Omit on the first call.' },
+        perPage: { type: 'integer', default: 50, description: 'Number of newest items to inspect, 1–96' },
         brandIds: { type: 'array', items: { type: 'integer' }, description: 'Numeric brand IDs from search_brands' },
         brand: { type: 'array', items: { type: 'string' }, description: 'Brand names; automatically resolved to IDs' },
         categoryId: { type: 'integer', description: 'Category ID from get_categories' },
+        size: { type: 'array', items: { type: 'string' }, description: 'Size labels, e.g. ["M"]; automatically resolved to IDs' },
         sizeIds: { type: 'array', items: { type: 'integer' }, description: 'Size IDs to filter by' },
+        color: { type: 'array', items: { type: 'string' }, description: 'Color names, e.g. ["black"]; automatically resolved to IDs' },
         colorIds: { type: 'array', items: { type: 'integer' }, description: 'Color IDs to filter by' },
         priceMin: { type: 'number', description: 'Minimum price in local currency' },
         priceMax: { type: 'number', description: 'Maximum price in local currency' },
@@ -291,7 +280,7 @@ const PROMPTS = [
 
 function makeServer(sharedClient?: VintedClient): Server {
   const server = new Server(
-    { name: 'vinted-cli', version: '1.6.2' },
+    { name: 'vinted-cli', version: VERSION },
     { capabilities: { tools: {}, prompts: {} } },
   );
 
@@ -359,96 +348,8 @@ function makeServer(sharedClient?: VintedClient): Server {
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
-    const { name, arguments: a = {} } = req.params;
     try {
-      const c = getClient();
-      let result: unknown;
-      switch (name) {
-        case 'search_items': {
-          const args = a as any;
-          if (!args.brandIds && Array.isArray(args.brand) && args.brand.length) {
-            const r = await resolveBrandIds(c, args.brand, args.country);
-            args.brandIds = r.ids.length ? r.ids : undefined;
-          }
-          if (!args.sizeIds && Array.isArray(args.size) && args.size.length) {
-            const r = await resolveSizeIds(c, args.size, args.country);
-            args.sizeIds = r.ids.length ? r.ids : undefined;
-          }
-          if (!args.colorIds && Array.isArray(args.color) && args.color.length) {
-            const r = await resolveColorIds(c, args.color, args.country);
-            args.colorIds = r.ids.length ? r.ids : undefined;
-          }
-          result = await opSearch(c, args);
-          break;
-        }
-        case 'search_brands': result = await opBrands(c, a as any); break;
-        case 'get_item': result = await opGetItem(c, a as any); break;
-        case 'get_seller': result = await opGetSeller(c, a as any); break;
-        case 'get_seller_items': result = await opSellerItems(c, a as any); break;
-        case 'compare_prices': {
-          const args = a as any;
-          if (!args.brandIds && Array.isArray(args.brand) && args.brand.length) {
-            const r = await resolveBrandIds(c, args.brand, args.countries?.[0] ?? 'fr');
-            args.brandIds = r.ids.length ? r.ids : undefined;
-          }
-          result = await opCompare(c, args);
-          break;
-        }
-        case 'get_trending': result = await opTrending(c, a as any); break;
-        case 'get_categories': result = await opCategories(c, a as any); break;
-        case 'search_all_items': {
-          const args = a as any;
-          if (!args.brandIds && Array.isArray(args.brand) && args.brand.length) {
-            const r = await resolveBrandIds(c, args.brand, args.country);
-            args.brandIds = r.ids.length ? r.ids : undefined;
-          }
-          if (!args.sizeIds && Array.isArray(args.size) && args.size.length) {
-            const r = await resolveSizeIds(c, args.size, args.country);
-            args.sizeIds = r.ids.length ? r.ids : undefined;
-          }
-          if (!args.colorIds && Array.isArray(args.color) && args.color.length) {
-            const r = await resolveColorIds(c, args.color, args.country);
-            args.colorIds = r.ids.length ? r.ids : undefined;
-          }
-          result = await opSearchAll(c, { ...args, maxItems: args.maxItems ?? 200 });
-          break;
-        }
-        case 'get_seller_feedback': result = await opGetSellerFeedback(c, a as any); break;
-        case 'get_colors': result = await opGetColors(c, a as any); break;
-        case 'get_size_groups': result = await opGetSizeGroups(c, a as any); break;
-        case 'resolve_color_ids': {
-          const args = a as any;
-          result = await resolveColorIds(c, args.colors ?? [], args.country);
-          break;
-        }
-        case 'resolve_size_ids': {
-          const args = a as any;
-          result = await resolveSizeIds(c, args.sizes ?? [], args.country);
-          break;
-        }
-        case 'get_new_items': {
-          const args = a as any;
-          if (!args.brandIds && Array.isArray(args.brand) && args.brand.length) {
-            const r = await resolveBrandIds(c, args.brand, args.country);
-            args.brandIds = r.ids.length ? r.ids : undefined;
-          }
-          const sinceMs = Date.now() - (args.sinceMinutes ?? 60) * 60_000;
-          const dateFrom = new Date(sinceMs).toISOString().split('T')[0];
-          const r = await opSearch(c, {
-            ...args,
-            sortBy: 'newest_first',
-            perPage: args.perPage ?? 50,
-            dateFrom,
-          });
-          const items = r.items.filter((i: any) => {
-            if (!i.createdAt) return true;
-            return new Date(i.createdAt).getTime() >= sinceMs;
-          });
-          result = { totalCount: items.length, page: 1, items };
-          break;
-        }
-        default: throw new Error(`Unknown tool: ${name}`);
-      }
+      const result = await callTool(getClient(), req.params.name, req.params.arguments);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -467,6 +368,14 @@ async function main() {
   await server.connect(stdio);
 }
 
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+
+function tokenMatches(header: string | undefined, token: string): boolean {
+  const given = /^Bearer (.+)$/.exec(header ?? '')?.[1] ?? '';
+  const digest = (v: string) => createHash('sha256').update(v).digest();
+  return timingSafeEqual(digest(given), digest(token));
+}
+
 async function startHttp() {
   const { StreamableHTTPServerTransport } = await import(
     '@modelcontextprotocol/sdk/server/streamableHttp.js'
@@ -475,12 +384,31 @@ async function startHttp() {
   const port = Number(process.env.VINTED_MCP_PORT ?? 3001);
   const host = process.env.VINTED_MCP_HOST ?? '127.0.0.1';
   const path = process.env.VINTED_MCP_PATH ?? '/mcp';
+  const token = process.env.VINTED_MCP_TOKEN || undefined;
+  const loopback = LOOPBACK_HOSTS.has(host.replace(/^\[|\]$/g, ''));
+
+  if (!loopback && !token) {
+    throw new Error(
+      `Refusing to listen on ${host} without authentication. Set VINTED_MCP_TOKEN, or bind to 127.0.0.1.`,
+    );
+  }
 
   const httpClient = new VintedClient();
   const httpServer = createServer(async (req, res) => {
-    if (!req.url || !req.url.startsWith(path)) {
-      res.statusCode = 404; res.end('Not Found'); return;
+    const reject = (code: number, msg: string) => { res.statusCode = code; res.end(msg); };
+    if (new URL(req.url ?? '/', 'http://localhost').pathname !== path) return reject(404, 'Not Found');
+
+    if (token) {
+      if (!tokenMatches(req.headers.authorization, token)) {
+        res.setHeader('WWW-Authenticate', 'Bearer');
+        return reject(401, 'Unauthorized');
+      }
+    } else {
+      // Unauthenticated loopback server: block DNS-rebinding and cross-origin browser calls.
+      const hostname = (req.headers.host ?? '').replace(/:\d+$/, '').replace(/^\[|\]$/g, '');
+      if (!LOOPBACK_HOSTS.has(hostname) || req.headers.origin) return reject(403, 'Forbidden');
     }
+
     const server = makeServer(httpClient);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on('close', () => { transport.close().catch(() => {}); server.close().catch(() => {}); });
@@ -489,7 +417,7 @@ async function startHttp() {
   });
 
   await new Promise<void>((resolve) => httpServer.listen(port, host, resolve));
-  process.stderr.write(`vinted-mcp listening on http://${host}:${port}${path}\n`);
+  process.stderr.write(`vinted-mcp listening on http://${host}:${port}${path}${token ? ' (bearer auth)' : ''}\n`);
 }
 
 main().catch((e) => {

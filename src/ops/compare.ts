@@ -1,6 +1,6 @@
 import { VintedClient } from '../client/session.js';
 import { searchSlim } from '../client/endpoints.js';
-import type { Country, Condition } from '../client/types.js';
+import { COUNTRIES, type Country, type Condition } from '../client/types.js';
 
 export interface CountryStats {
   country: Country;
@@ -19,6 +19,7 @@ export interface CompareResult {
   bestBuyCountry: Country | null;
   bestSellCountry: Country | null;
   arbitrageSpreadPct: number;
+  failed?: { country: Country; error: string }[];
 }
 
 function stdDev(xs: number[], avg: number): number {
@@ -49,8 +50,11 @@ export async function opCompare(
   },
 ): Promise<CompareResult> {
   if (!input.query?.trim()) throw new Error('query is required');
-  const countries = input.countries ?? ['fr', 'de', 'it', 'es', 'nl', 'pl'];
-  const limit = input.limit ?? 20;
+  const countries = [...new Set(input.countries ?? (['fr', 'de', 'it', 'es', 'nl', 'pl'] as Country[]))];
+  for (const c of countries) {
+    if (!COUNTRIES.includes(c)) throw new Error(`Unknown country: ${String(c)}`);
+  }
+  const limit = Math.min(Math.max(Math.trunc(input.limit ?? 20) || 20, 1), 96);
   const concurrency = Math.max(1, Math.min(input.concurrency ?? 3, 6));
 
   const extra = Object.fromEntries(
@@ -63,6 +67,7 @@ export async function opCompare(
     }).filter(([, v]) => v !== undefined),
   ) as Parameters<typeof searchSlim>[4];
 
+  const failed: { country: Country; error: string }[] = [];
   const fetchOne = async (c: Country): Promise<CountryStats | null> => {
     try {
       const items = await searchSlim(client, input.query, c, limit, extra);
@@ -79,7 +84,8 @@ export async function opCompare(
         minPrice: round(Math.min(...prices)),
         maxPrice: round(Math.max(...prices)),
       } satisfies CountryStats;
-    } catch {
+    } catch (e) {
+      failed.push({ country: c, error: e instanceof Error ? e.message : String(e) });
       return null;
     }
   };
@@ -87,7 +93,10 @@ export async function opCompare(
   const results = await runWithConcurrency(countries, concurrency, fetchOne);
   const stats = results.filter((x): x is CountryStats => x !== null);
   if (!stats.length) {
-    return { query: input.query, countries: [], bestBuyCountry: null, bestSellCountry: null, arbitrageSpreadPct: 0 };
+    return {
+      query: input.query, countries: [], bestBuyCountry: null, bestSellCountry: null, arbitrageSpreadPct: 0,
+      ...(failed.length ? { failed } : {}),
+    };
   }
 
   const byMedian = [...stats].sort((a, b) => a.medianPrice - b.medianPrice);
@@ -101,6 +110,7 @@ export async function opCompare(
     bestBuyCountry: lo.country,
     bestSellCountry: hi.country,
     arbitrageSpreadPct: round(spread),
+    ...(failed.length ? { failed } : {}),
   };
 }
 

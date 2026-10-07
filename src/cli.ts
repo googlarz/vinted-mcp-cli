@@ -15,6 +15,7 @@ import { opGetColors, resolveColorIds } from './ops/get-colors.js';
 import { opGetSizeGroups } from './ops/get-size-groups.js';
 import { resolveSizeIds } from './ops/sizes.js';
 import { printOutput } from './format.js';
+import { VERSION } from './version.js';
 
 type OutputFormat = 'json' | 'table';
 
@@ -40,7 +41,7 @@ const program = new Command();
 program
   .name('vinted')
   .description('CLI for the Vinted marketplace — search, items, sellers, price compare, trending.')
-  .version('1.6.2')
+  .version(VERSION)
   .option('--proxy <url>', 'HTTP/HTTPS proxy URL (also: VINTED_PROXY_URL, HTTPS_PROXY)')
   .option('--no-cache', 'disable in-memory response cache (default 60s TTL)')
   .addOption(new Option('--output <fmt>', 'output format').choices(['json', 'table']).default('json'));
@@ -60,10 +61,8 @@ program
   .option('--color <names>', 'comma-separated color names (resolved to IDs via Vinted lookup)')
   .option('--condition <list>', 'comma-separated conditions', (v) => parseList<Condition>(v))
   .addOption(new Option('--sort <s>', 'sort').choices(['relevance', 'price_low_to_high', 'price_high_to_low', 'newest_first']).default('relevance'))
-  .option('-l, --limit <n>', 'max items per page (1–100)', (v) => Number(v), 20)
+  .option('-l, --limit <n>', 'items to return (1–96; Vinted serves fixed pages of 96)', (v) => Number(v), 20)
   .option('-p, --page <n>', 'page', (v) => Number(v), 1)
-  .option('--date-from <date>', 'filter items listed after this date (YYYY-MM-DD)')
-  .option('--date-to <date>', 'filter items listed before this date (YYYY-MM-DD)')
   .option('--all', 'walk pages and return all results (up to --max-items)')
   .option('--max-items <n>', 'cap when --all (default 1000)', (v) => Number(v), 1000)
   .option('--max-pages <n>', 'cap when --all (default 25)', (v) => Number(v), 25)
@@ -113,25 +112,28 @@ program
         sortBy: o.sort as SortBy,
         perPage: o.limit,
         page: o.page,
-        dateFrom: o.dateFrom,
-        dateTo: o.dateTo,
       };
 
       if (o.watch !== undefined) {
-        const interval = typeof o.watch === 'string' ? Number(o.watch) * 1000 : 60_000;
-        const seen = new Set<number>();
+        const seconds = o.watch === true ? 60 : Number(o.watch);
+        if (!Number.isFinite(seconds) || seconds < 5) fail(new Error('--watch interval must be a number of seconds, at least 5'));
+        const interval = seconds * 1000;
+        let seen: Set<number> | undefined;
         const poll = async () => {
-          const r = await opSearch(c, { ...params, sortBy: 'newest_first', perPage: 50 });
-          const fresh = r.items.filter((i) => !seen.has(i.id));
-          fresh.forEach((i) => seen.add(i.id));
-          if (seen.size > 0 && fresh.length > 0) {
-            out({ totalCount: fresh.length, page: 1, items: fresh }, fmt);
-          }
+          const r = await opSearch(c, { ...params, sortBy: 'newest_first', perPage: 50, noCache: true });
+          const fresh = seen ? r.items.filter((i) => !seen!.has(i.id)) : [];
+          seen = new Set(r.items.map((i) => i.id)); // first run only records the baseline
+          if (fresh.length > 0) out({ totalCount: fresh.length, page: 1, items: fresh }, fmt);
         };
-        await poll(); // first run populates seen set without printing
-        process.stderr.write(`watching "${query}" every ${interval / 1000}s — Ctrl+C to stop\n`);
-        setInterval(poll, interval);
-        return;
+        process.stderr.write(`watching "${query}" every ${seconds}s — Ctrl+C to stop\n`);
+        for (;;) {
+          try {
+            await poll();
+          } catch (e) {
+            process.stderr.write(`warn: poll failed: ${e instanceof Error ? e.message : String(e)}\n`);
+          }
+          await new Promise((resolve) => setTimeout(resolve, interval));
+        }
       }
 
       const r = o.all
@@ -268,12 +270,14 @@ program
 
 program
   .command('debug')
-  .description('Inspect bootstrap (cookies received from homepage)')
+  .description('Inspect bootstrap (names of cookies received from homepage)')
   .addOption(new Option('-c, --country <cc>', 'country code').choices(COUNTRIES).default('fr'))
+  .option('--show-cookie', 'also print the cookie values')
   .action(async (o, cmd) => {
     try {
       const c = client(cmd.optsWithGlobals());
-      out(await c.debug(o.country as Country));
+      const { cookie, ...info } = await c.debug(o.country as Country);
+      out(o.showCookie ? { ...info, cookie } : info);
     } catch (e) { fail(e); }
   });
 
