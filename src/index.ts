@@ -18,3 +18,5 @@ export { opSellerItems } from './ops/seller-items.js';
 export { opGetSellerFeedback } from './ops/get-seller-feedback.js';
 export { opGetColors } from './ops/get-colors.js';
 export { opGetSizeGroups } from './ops/get-size-groups.js';
+export { resolveSizeIds } from './ops/sizes.js';
+export type { ResolveSizeIdsResult } from './ops/sizes.js';

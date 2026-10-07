@@ -10,6 +10,10 @@ import { opTrending } from './ops/trending.js';
 import { opBrands, resolveBrandIds } from './ops/brands.js';
 import { opCategories } from './ops/categories.js';
 import { opSellerItems } from './ops/seller-items.js';
+import { opGetSellerFeedback } from './ops/get-seller-feedback.js';
+import { opGetColors } from './ops/get-colors.js';
+import { opGetSizeGroups } from './ops/get-size-groups.js';
+import { resolveSizeIds } from './ops/sizes.js';
 import { printOutput } from './format.js';
 
 type OutputFormat = 'json' | 'table';
@@ -36,7 +40,7 @@ const program = new Command();
 program
   .name('vinted')
   .description('CLI for the Vinted marketplace — search, items, sellers, price compare, trending.')
-  .version('1.0.0')
+  .version('1.6.0')
   .option('--proxy <url>', 'HTTP/HTTPS proxy URL (also: VINTED_PROXY_URL, HTTPS_PROXY)')
   .option('--no-cache', 'disable in-memory response cache (default 60s TTL)')
   .addOption(new Option('--output <fmt>', 'output format').choices(['json', 'table']).default('json'));
@@ -227,6 +231,64 @@ program
         categoryId: o.categoryId,
         limit: o.limit,
       });
+      out(r, g.output);
+    } catch (e) { fail(e); }
+  });
+
+program
+  .command('feedback <id>')
+  .description('Fetch buyer/seller feedback reviews for a user')
+  .addOption(new Option('-c, --country <cc>', 'country code').choices(COUNTRIES).default('fr'))
+  .option('-l, --limit <n>', 'reviews per page', (v) => Number(v), 20)
+  .option('-p, --page <n>', 'page', (v) => Number(v), 1)
+  .action(async (id: string, o, cmd) => {
+    try {
+      const g = cmd.optsWithGlobals();
+      const r = await opGetSellerFeedback(client(g), {
+        sellerId: Number(id),
+        country: o.country as Country,
+        limit: o.limit,
+        page: o.page,
+      });
+      out(r, g.output);
+    } catch (e) { fail(e); }
+  });
+
+program
+  .command('colors')
+  .description('List all Vinted color options with IDs (use IDs with --color-ids in search)')
+  .addOption(new Option('-c, --country <cc>', 'country code').choices(COUNTRIES).default('fr'))
+  .action(async (o, cmd) => {
+    try {
+      const g = cmd.optsWithGlobals();
+      const r = await opGetColors(client(g), { country: o.country as Country });
+      out(r, g.output);
+    } catch (e) { fail(e); }
+  });
+
+program
+  .command('size-groups')
+  .description('List all Vinted size groups with size IDs (use IDs with --size-ids in search)')
+  .addOption(new Option('-c, --country <cc>', 'country code').choices(COUNTRIES).default('fr'))
+  .action(async (o, cmd) => {
+    try {
+      const g = cmd.optsWithGlobals();
+      const r = await opGetSizeGroups(client(g), { country: o.country as Country });
+      out(r, g.output);
+    } catch (e) { fail(e); }
+  });
+
+program
+  .command('sizes <labels...>')
+  .description('Resolve size labels (e.g. "M" "42") to numeric Vinted size IDs for use with --size-ids')
+  .addOption(new Option('-c, --country <cc>', 'country code').choices(COUNTRIES).default('fr'))
+  .action(async (labels: string[], o, cmd) => {
+    try {
+      const g = cmd.optsWithGlobals();
+      const r = await resolveSizeIds(client(g), labels, o.country as Country);
+      if (r.unresolved.length) {
+        process.stderr.write(`warn: unresolved size(s): ${r.unresolved.join(', ')}\n`);
+      }
       out(r, g.output);
     } catch (e) { fail(e); }
   });

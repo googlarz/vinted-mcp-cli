@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema,
+} from '@modelcontextprotocol/sdk/types.js';
 import { VintedClient } from './client/session.js';
 import { COUNTRIES } from './client/types.js';
 import { opSearch } from './ops/search.js';
@@ -16,6 +21,7 @@ import { opGetSellerFeedback } from './ops/get-seller-feedback.js';
 import { opSearchAll } from './ops/search.js';
 import { opGetColors } from './ops/get-colors.js';
 import { opGetSizeGroups } from './ops/get-size-groups.js';
+import { resolveSizeIds } from './ops/sizes.js';
 
 const TOOLS = [
   {
@@ -177,6 +183,40 @@ const TOOLS = [
     },
   },
   {
+    name: 'resolve_size_ids',
+    description: 'Resolve human-readable size labels (e.g. "M", "42", "XL", "12 UK") to numeric Vinted size IDs suitable for use in search_items.sizeIds and search_all_items.sizeIds. Returns matched IDs with the group they belong to (e.g. "Women\'s clothing"), and a list of any labels that could not be resolved. Because "M" or "42" appear in multiple size groups (women\'s, men\'s, kids\'), multiple IDs may be returned per label — pass them all to sizeIds to cast a wide net, or filter by group name if you need a specific category.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sizes: { type: 'array', items: { type: 'string' }, description: 'Size labels to resolve, e.g. ["M", "L"] or ["42", "43"] or ["XS", "S", "M"]' },
+        country: { type: 'string', enum: COUNTRIES, default: 'fr', description: 'Vinted country site to query (size catalogues are shared across countries)' },
+      },
+      required: ['sizes'],
+    },
+  },
+  {
+    name: 'get_new_items',
+    description: 'Fetch the most recently listed items for a search query, optionally filtered to those posted within the last N minutes. Use this to monitor a search and detect new listings — call it repeatedly with the same query to get fresh arrivals. Items are sorted newest-first. Supports the same filters as search_items (brand, category, size, color, price, condition).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search keywords to monitor, e.g. "Nike Air Max 90 size 42"' },
+        country: { type: 'string', enum: COUNTRIES, default: 'fr', description: 'Vinted country site to monitor' },
+        sinceMinutes: { type: 'integer', default: 60, description: 'Return only items listed in the last N minutes (approximate — Vinted date filters are day-granular; sub-hour filtering applied client-side on createdAt when available). Default 60.' },
+        perPage: { type: 'integer', default: 50, description: 'Number of items to fetch before applying the time filter, 1–96' },
+        brandIds: { type: 'array', items: { type: 'integer' }, description: 'Numeric brand IDs from search_brands' },
+        brand: { type: 'array', items: { type: 'string' }, description: 'Brand names; automatically resolved to IDs' },
+        categoryId: { type: 'integer', description: 'Category ID from get_categories' },
+        sizeIds: { type: 'array', items: { type: 'integer' }, description: 'Size IDs to filter by' },
+        colorIds: { type: 'array', items: { type: 'integer' }, description: 'Color IDs to filter by' },
+        priceMin: { type: 'number', description: 'Minimum price in local currency' },
+        priceMax: { type: 'number', description: 'Maximum price in local currency' },
+        condition: { type: 'array', items: { type: 'string', enum: ['new_with_tags', 'new_without_tags', 'very_good', 'good', 'satisfactory'] }, description: 'Item condition filter' },
+      },
+      required: ['query'],
+    },
+  },
+  {
     name: 'get_trending',
     description: 'Fetch the newest and trending items on Vinted for a given country, ordered by recency. Optionally scoped to a specific category. Useful for discovering what\'s currently popular, monitoring new arrivals, or finding deals as they are listed.',
     inputSchema: {
@@ -190,16 +230,111 @@ const TOOLS = [
   },
 ];
 
+const PROMPTS = [
+  {
+    name: 'find-bargains',
+    description: 'Find items priced below average for a search query — compares prices, then lists the cheapest listings relative to the median.',
+    arguments: [
+      { name: 'query', description: 'What to search for, e.g. "Nike Air Max 90"', required: true },
+      { name: 'country', description: 'Vinted country site code (default: fr)', required: false },
+      { name: 'maxPrice', description: 'Maximum price cap in local currency', required: false },
+    ],
+  },
+  {
+    name: 'seller-check',
+    description: 'Due-diligence check on a Vinted seller — fetches profile, active listings, and recent reviews to assess trustworthiness.',
+    arguments: [
+      { name: 'sellerId', description: 'Numeric seller user ID (from item listings or profile URL)', required: true },
+      { name: 'country', description: 'Vinted country site code (default: fr)', required: false },
+    ],
+  },
+  {
+    name: 'price-comparison',
+    description: 'Find the cheapest country to buy a specific item by comparing prices across all Vinted sites.',
+    arguments: [
+      { name: 'query', description: 'Item to compare, e.g. "Levi 501 jeans W32"', required: true },
+    ],
+  },
+  {
+    name: 'wardrobe-hunt',
+    description: 'Search for a specific brand, size, and color combination — resolves size labels and color names to Vinted filter IDs automatically.',
+    arguments: [
+      { name: 'brand', description: 'Brand name, e.g. "Adidas" or "Zara"', required: true },
+      { name: 'size', description: 'Size label, e.g. "M", "42", "XL"', required: false },
+      { name: 'color', description: 'Color name, e.g. "black", "navy"', required: false },
+      { name: 'country', description: 'Vinted country site code (default: fr)', required: false },
+    ],
+  },
+];
+
 function makeServer(sharedClient?: VintedClient): Server {
   const server = new Server(
-    { name: 'vinted-cli', version: '1.0.0' },
-    { capabilities: { tools: {} } },
+    { name: 'vinted-cli', version: '1.6.0' },
+    { capabilities: { tools: {}, prompts: {} } },
   );
 
   let client: VintedClient | null = sharedClient ?? null;
   const getClient = () => (client ??= new VintedClient());
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
+
+  server.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts: PROMPTS }));
+
+  server.setRequestHandler(GetPromptRequestSchema, async (req) => {
+    const { name, arguments: args = {} } = req.params;
+    const a = (args ?? {}) as Record<string, string>;
+    const text = (t: string) => ({ role: 'user' as const, content: { type: 'text' as const, text: t } });
+
+    switch (name) {
+      case 'find-bargains': {
+        const country = a.country ?? 'fr';
+        const cap = a.maxPrice ? ` with a maximum price of ${a.maxPrice}` : '';
+        return { messages: [text(
+          `Find bargains for "${a.query}" on Vinted ${country}${cap}. ` +
+          `Use compare_prices to get the median/mean price. Then use search_items with sortBy "price_low_to_high"${cap ? ` and priceMax ${a.maxPrice}` : ''} to fetch listings. ` +
+          `Identify items priced more than 20% below the median and highlight them as potential deals. ` +
+          `Present: median price, top 5 bargains with titles, prices, item URLs, and condition.`,
+        )] };
+      }
+      case 'seller-check': {
+        const country = a.country ?? 'fr';
+        return { messages: [text(
+          `Run a due-diligence check on Vinted seller ID ${a.sellerId} (${country}). Use these tools in order:\n` +
+          `1. get_seller — fetch their profile (reputation score, feedback count, active listing count)\n` +
+          `2. get_seller_feedback — fetch their last 20 reviews; note any negative or neutral ones and what went wrong\n` +
+          `3. get_seller_items — browse their current listings\n\n` +
+          `Summarise: overall trust score, notable positives, any red flags, average response to issues, and your buying recommendation (yes/cautious/no).`,
+        )] };
+      }
+      case 'price-comparison': {
+        return { messages: [text(
+          `Compare prices for "${a.query}" across all Vinted country sites. ` +
+          `Use compare_prices with no countries filter to get stats for all markets. ` +
+          `Rank countries from cheapest to most expensive by median price. ` +
+          `Convert to EUR for comparison (use approximate rates if needed). ` +
+          `Recommend the best country to buy from and note any obvious shipping or import considerations.`,
+        )] };
+      }
+      case 'wardrobe-hunt': {
+        const country = a.country ?? 'fr';
+        const steps: string[] = [
+          `Search for "${a.brand}" items on Vinted ${country} using these steps:`,
+          `1. search_brands with query "${a.brand}" to get the brand ID.`,
+        ];
+        if (a.size) steps.push(`2. resolve_size_ids with sizes ["${a.size}"] to get size IDs.`);
+        if (a.color) steps.push(`${a.size ? '3' : '2'}. get_colors and find the ID for "${a.color}".`);
+        steps.push(
+          `${[a.size, a.color].filter(Boolean).length + 2}. search_items with brandIds, ` +
+          (a.size ? `sizeIds, ` : '') +
+          (a.color ? `colorIds, ` : '') +
+          `country "${country}", sortBy "price_low_to_high". Return the top 10 results with titles, prices, condition, and item URLs.`,
+        );
+        return { messages: [text(steps.join('\n'))] };
+      }
+      default:
+        throw new Error(`Unknown prompt: ${name}`);
+    }
+  });
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const { name, arguments: a = {} } = req.params;
@@ -235,6 +370,32 @@ function makeServer(sharedClient?: VintedClient): Server {
         case 'get_seller_feedback': result = await opGetSellerFeedback(c, a as any); break;
         case 'get_colors': result = await opGetColors(c, a as any); break;
         case 'get_size_groups': result = await opGetSizeGroups(c, a as any); break;
+        case 'resolve_size_ids': {
+          const args = a as any;
+          result = await resolveSizeIds(c, args.sizes ?? [], args.country);
+          break;
+        }
+        case 'get_new_items': {
+          const args = a as any;
+          if (!args.brandIds && Array.isArray(args.brand) && args.brand.length) {
+            const r = await resolveBrandIds(c, args.brand, args.country);
+            args.brandIds = r.ids.length ? r.ids : undefined;
+          }
+          const sinceMs = Date.now() - (args.sinceMinutes ?? 60) * 60_000;
+          const today = new Date().toISOString().split('T')[0];
+          const r = await opSearch(c, {
+            ...args,
+            sortBy: 'newest_first',
+            perPage: args.perPage ?? 50,
+            dateFrom: today,
+          });
+          const items = r.items.filter((i: any) => {
+            if (!i.createdAt) return true;
+            return new Date(i.createdAt).getTime() >= sinceMs;
+          });
+          result = { totalCount: items.length, page: 1, items };
+          break;
+        }
         default: throw new Error(`Unknown tool: ${name}`);
       }
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
