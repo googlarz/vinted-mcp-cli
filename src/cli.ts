@@ -11,7 +11,7 @@ import { opBrands, resolveBrandIds } from './ops/brands.js';
 import { opCategories } from './ops/categories.js';
 import { opSellerItems } from './ops/seller-items.js';
 import { opGetSellerFeedback } from './ops/get-seller-feedback.js';
-import { opGetColors } from './ops/get-colors.js';
+import { opGetColors, resolveColorIds } from './ops/get-colors.js';
 import { opGetSizeGroups } from './ops/get-size-groups.js';
 import { resolveSizeIds } from './ops/sizes.js';
 import { printOutput } from './format.js';
@@ -40,7 +40,7 @@ const program = new Command();
 program
   .name('vinted')
   .description('CLI for the Vinted marketplace — search, items, sellers, price compare, trending.')
-  .version('1.6.0')
+  .version('1.6.1')
   .option('--proxy <url>', 'HTTP/HTTPS proxy URL (also: VINTED_PROXY_URL, HTTPS_PROXY)')
   .option('--no-cache', 'disable in-memory response cache (default 60s TTL)')
   .addOption(new Option('--output <fmt>', 'output format').choices(['json', 'table']).default('json'));
@@ -55,6 +55,8 @@ program
   .option('--brand <names>', 'comma-separated brand names (resolved to IDs via Vinted lookup)')
   .option('--category-id <n>', 'category ID', (v) => Number(v))
   .option('--size-ids <ids>', 'comma-separated size IDs', (v) => parseList<string>(v).map(Number))
+  .option('--color-ids <ids>', 'comma-separated color IDs', (v) => parseList<string>(v).map(Number))
+  .option('--color <names>', 'comma-separated color names (resolved to IDs via Vinted lookup)')
   .option('--condition <list>', 'comma-separated conditions', (v) => parseList<Condition>(v))
   .addOption(new Option('--sort <s>', 'sort').choices(['relevance', 'price_low_to_high', 'price_high_to_low', 'newest_first']).default('relevance'))
   .option('-l, --limit <n>', 'max items per page (1–100)', (v) => Number(v), 20)
@@ -79,6 +81,15 @@ program
           process.stderr.write(`warn: unresolved brand(s): ${r.unresolved.join(', ')}\n`);
         }
       }
+      let colorIds = o.colorIds as number[] | undefined;
+      if (!colorIds && o.color) {
+        const names = parseList<string>(o.color);
+        const r = await resolveColorIds(c, names, o.country as Country);
+        colorIds = r.ids.length ? r.ids : undefined;
+        if (r.unresolved.length) {
+          process.stderr.write(`warn: unresolved color(s): ${r.unresolved.join(', ')}\n`);
+        }
+      }
       const params = {
         query,
         country: o.country as Country,
@@ -87,6 +98,7 @@ program
         brandIds,
         categoryId: o.categoryId,
         sizeIds: o.sizeIds,
+        colorIds,
         condition: o.condition,
         sortBy: o.sort as SortBy,
         perPage: o.limit,
@@ -170,12 +182,36 @@ program
 program
   .command('compare <query>')
   .description('Compare prices across countries')
-  .option('--countries <list>', 'comma-separated country codes', (v) => parseList<Country>(v), ['fr', 'de', 'it', 'es', 'nl', 'pl'])
+  .option('--countries <list>', 'comma-separated country codes (default: fr,de,it,es,nl,pl)', (v) => parseList<Country>(v))
+  .option('--all-countries', 'compare all 19 Vinted countries')
   .option('-l, --limit <n>', 'items per country', (v) => Number(v), 20)
+  .option('--brand-ids <ids>', 'comma-separated brand IDs', (v) => parseList<string>(v).map(Number))
+  .option('--brand <names>', 'comma-separated brand names (resolved to IDs)')
+  .option('--category-id <n>', 'category ID', (v) => Number(v))
+  .option('--size-ids <ids>', 'comma-separated size IDs', (v) => parseList<string>(v).map(Number))
+  .option('--color-ids <ids>', 'comma-separated color IDs', (v) => parseList<string>(v).map(Number))
+  .option('--condition <list>', 'comma-separated conditions', (v) => parseList<Condition>(v))
   .action(async (query: string, o, cmd) => {
     try {
       const g = cmd.optsWithGlobals();
-      const r = await opCompare(client(g), { query, countries: o.countries, limit: o.limit });
+      const c = client(g);
+      let brandIds = o.brandIds as number[] | undefined;
+      if (!brandIds && o.brand) {
+        const r = await resolveBrandIds(c, parseList<string>(o.brand), 'fr');
+        brandIds = r.ids.length ? r.ids : undefined;
+        if (r.unresolved.length) process.stderr.write(`warn: unresolved brand(s): ${r.unresolved.join(', ')}\n`);
+      }
+      const countries = o.allCountries ? ([...COUNTRIES] as Country[]) : (o.countries ?? ['fr', 'de', 'it', 'es', 'nl', 'pl'] as Country[]);
+      const r = await opCompare(c, {
+        query,
+        countries,
+        limit: o.limit,
+        brandIds,
+        categoryId: o.categoryId,
+        sizeIds: o.sizeIds,
+        colorIds: o.colorIds,
+        condition: o.condition,
+      });
       out(r, g.output);
     } catch (e) { fail(e); }
   });

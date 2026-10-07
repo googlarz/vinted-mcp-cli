@@ -350,8 +350,9 @@ export async function searchSlim(
   query: string,
   country: Country,
   perPage = 20,
+  extra?: Pick<SearchParams, 'brandIds' | 'categoryId' | 'sizeIds' | 'colorIds' | 'condition'>,
 ): Promise<ItemSlim[]> {
-  const r = await searchItems(client, { query, country, perPage, sortBy: 'relevance' });
+  const r = await searchItems(client, { query, country, perPage, sortBy: 'relevance', ...extra });
   return r.items
     .map((i) => ({ price: Number(i.price), currency: i.currency }))
     .filter((x) => Number.isFinite(x.price) && x.price > 0);

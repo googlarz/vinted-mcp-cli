@@ -96,6 +96,23 @@ vinted brands "stone island"
 
 # What's trending right now
 vinted trending --country fr --output table
+
+# Resolve size labels to IDs, then use in search
+vinted sizes M L XL --country de
+vinted search "levi 501" --size-ids 206,207,208
+
+# Filter by color (name auto-resolved)
+vinted search "north face jacket" --color black --country fr
+
+# Cross-country compare with filters (size M only)
+vinted compare "adidas samba" --size-ids 103 --all-countries --output table
+
+# Seller due-diligence
+vinted feedback 987654 --country fr --output table
+
+# Browse colors and size groups
+vinted colors --output table
+vinted size-groups --output table
 ```
 
 ---
@@ -108,9 +125,13 @@ vinted trending --country fr --output table
 | `item <id\|url>` | Get full item detail |
 | `seller <id>` | Seller profile |
 | `seller-items <id>` | Items a seller has for sale |
-| `compare <query>` | Price comparison across countries |
+| `feedback <id>` | Seller/buyer reviews (paginated) |
+| `compare <query>` | Price comparison across countries with optional filters |
 | `brands <query>` | Look up brand IDs by name |
 | `categories` | Browse the category tree |
+| `colors` | List all color options with IDs |
+| `size-groups` | List all size groups with IDs |
+| `sizes <labels...>` | Resolve size labels ("M", "42") to numeric IDs |
 | `trending` | Newest / trending listings |
 | `debug` | Inspect session cookies (for troubleshooting) |
 
@@ -131,7 +152,9 @@ vinted trending --country fr --output table
 | `--brand <names>` | Brand names (auto-resolved to IDs) |
 | `--brand-ids <ids>` | Comma-separated brand IDs |
 | `--category-id <n>` | Category ID (`vinted categories` to browse) |
-| `--size-ids <ids>` | Comma-separated size IDs |
+| `--size-ids <ids>` | Comma-separated size IDs (`vinted sizes M L` to resolve) |
+| `--color-ids <ids>` | Comma-separated color IDs (`vinted colors` to browse) |
+| `--color <names>` | Color names (auto-resolved to IDs, e.g. `--color black,white`) |
 | `--condition <list>` | `new_with_tags`, `new_without_tags`, `very_good`, `good`, `satisfactory` |
 | `--sort <s>` | `relevance`, `price_low_to_high`, `price_high_to_low`, `newest_first` |
 | `--date-from / --date-to` | Date range filter (YYYY-MM-DD) |
@@ -176,14 +199,31 @@ claude mcp add vinted -- npx -y @googlarz/vinted-client/mcp
 
 | Tool | Description |
 |---|---|
-| `search_items` | Search with full filter support |
+| `search_items` | Search with full filter support (brand, size, color, condition, price, dates) |
+| `search_all_items` | Like `search_items` but auto-paginates and returns all results |
+| `get_new_items` | Poll for newly listed items in the last N minutes |
 | `get_item` | Item detail by ID or URL |
 | `get_seller` | Seller profile |
 | `get_seller_items` | Active listings for a seller |
-| `compare_prices` | Multi-country price comparison |
-| `get_trending` | Trending listings |
-| `search_brands` | Brand lookup |
-| `get_categories` | Category tree |
+| `get_seller_feedback` | Paginated buyer/seller reviews with star ratings |
+| `compare_prices` | Multi-country price stats (median, mean, stdDev, min, max) with filters |
+| `get_trending` | Trending / newest listings |
+| `search_brands` | Brand lookup — returns IDs for use in filters |
+| `get_categories` | Category tree — returns IDs for use in filters |
+| `get_colors` | All color options with hex codes and IDs |
+| `get_size_groups` | All size groups with IDs (Women's, Men's, Shoes, Kids…) |
+| `resolve_size_ids` | Resolve size labels ("M", "42", "XL") to numeric filter IDs |
+
+### MCP Prompts
+
+Built-in prompt templates for common workflows — use them from any MCP-compatible client:
+
+| Prompt | Arguments | Description |
+|---|---|---|
+| `find-bargains` | `query`, `country?`, `maxPrice?` | Find items priced below the median — highlights potential deals |
+| `seller-check` | `sellerId`, `country?` | Due-diligence check — profile, reviews, listings |
+| `price-comparison` | `query` | Rank all countries by median price, recommend cheapest market |
+| `wardrobe-hunt` | `brand`, `size?`, `color?`, `country?` | Brand + size + color search with auto-resolved IDs |
 
 **Example prompts once connected:**
 
@@ -191,7 +231,9 @@ claude mcp add vinted -- npx -y @googlarz/vinted-client/mcp
 
 > *"Compare prices for a North Face puffer jacket across France, Germany and Italy"*
 
-> *"Watch seller #987654 and tell me when they list something under €30"*
+> *"Is seller #987654 trustworthy? Check their reviews and listings."*
+
+> *"Find black Levi's 501 jeans size 32 — use the wardrobe-hunt prompt"*
 
 ---
 

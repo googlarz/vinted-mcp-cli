@@ -1,6 +1,6 @@
 import { VintedClient } from '../client/session.js';
 import { searchSlim } from '../client/endpoints.js';
-import type { Country } from '../client/types.js';
+import type { Country, Condition } from '../client/types.js';
 
 export interface CountryStats {
   country: Country;
@@ -8,6 +8,7 @@ export interface CountryStats {
   currency: string;
   avgPrice: number;
   medianPrice: number;
+  stdDev: number;
   minPrice: number;
   maxPrice: number;
 }
@@ -20,6 +21,12 @@ export interface CompareResult {
   arbitrageSpreadPct: number;
 }
 
+function stdDev(xs: number[], avg: number): number {
+  if (xs.length < 2) return 0;
+  const variance = xs.reduce((sum, x) => sum + (x - avg) ** 2, 0) / xs.length;
+  return round(Math.sqrt(variance));
+}
+
 function median(xs: number[]): number {
   if (!xs.length) return 0;
   const s = [...xs].sort((a, b) => a - b);
@@ -29,24 +36,46 @@ function median(xs: number[]): number {
 
 export async function opCompare(
   client: VintedClient,
-  input: { query: string; countries?: Country[]; limit?: number; concurrency?: number },
+  input: {
+    query: string;
+    countries?: Country[];
+    limit?: number;
+    concurrency?: number;
+    brandIds?: number[];
+    categoryId?: number;
+    sizeIds?: number[];
+    colorIds?: number[];
+    condition?: Condition[];
+  },
 ): Promise<CompareResult> {
   if (!input.query?.trim()) throw new Error('query is required');
   const countries = input.countries ?? ['fr', 'de', 'it', 'es', 'nl', 'pl'];
   const limit = input.limit ?? 20;
   const concurrency = Math.max(1, Math.min(input.concurrency ?? 3, 6));
 
+  const extra = Object.fromEntries(
+    Object.entries({
+      brandIds: input.brandIds,
+      categoryId: input.categoryId,
+      sizeIds: input.sizeIds,
+      colorIds: input.colorIds,
+      condition: input.condition,
+    }).filter(([, v]) => v !== undefined),
+  ) as Parameters<typeof searchSlim>[4];
+
   const fetchOne = async (c: Country): Promise<CountryStats | null> => {
     try {
-      const items = await searchSlim(client, input.query, c, limit);
+      const items = await searchSlim(client, input.query, c, limit, extra);
       if (!items.length) return null;
       const prices = items.map((i) => i.price);
+      const avg = round(prices.reduce((a, b) => a + b, 0) / prices.length);
       return {
         country: c,
         itemCount: items.length,
         currency: items[0].currency,
-        avgPrice: round(prices.reduce((a, b) => a + b, 0) / prices.length),
+        avgPrice: avg,
         medianPrice: round(median(prices)),
+        stdDev: stdDev(prices, avg),
         minPrice: round(Math.min(...prices)),
         maxPrice: round(Math.max(...prices)),
       } satisfies CountryStats;

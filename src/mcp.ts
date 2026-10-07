@@ -90,13 +90,19 @@ const TOOLS = [
   },
   {
     name: 'compare_prices',
-    description: 'Compare prices for a search query across multiple Vinted country sites simultaneously. Returns median, mean, min, max, standard deviation, and sample count per country along with the local currency. Useful for finding the cheapest market to buy a specific item or understanding cross-border price gaps.',
+    description: 'Compare prices for a search query across multiple Vinted country sites simultaneously. Returns median, mean, stdDev, min, max, and sample count per country along with the local currency. Supports the same brand/size/color/condition filters as search_items for precise cross-country comparisons. Useful for finding the cheapest market or understanding cross-border price gaps.',
     inputSchema: {
       type: 'object',
       properties: {
         query: { type: 'string', description: 'Item to compare prices for, e.g. "Levi 501 jeans" or "iPhone 14 case"' },
-        countries: { type: 'array', items: { type: 'string', enum: COUNTRIES }, description: 'List of country codes to compare. Defaults to all 19 Vinted countries if omitted.' },
+        countries: { type: 'array', items: { type: 'string', enum: COUNTRIES }, description: 'List of country codes to compare. Defaults to ["fr","de","it","es","nl","pl"] if omitted.' },
         limit: { type: 'integer', default: 20, description: 'Number of listings to sample per country. Higher values give more accurate statistics (max 96).' },
+        brandIds: { type: 'array', items: { type: 'integer' }, description: 'Numeric brand IDs to filter by (from search_brands)' },
+        brand: { type: 'array', items: { type: 'string' }, description: 'Brand names; automatically resolved to IDs' },
+        categoryId: { type: 'integer', description: 'Category ID from get_categories' },
+        sizeIds: { type: 'array', items: { type: 'integer' }, description: 'Size IDs to filter by (from resolve_size_ids)' },
+        colorIds: { type: 'array', items: { type: 'integer' }, description: 'Color IDs to filter by (from get_colors)' },
+        condition: { type: 'array', items: { type: 'string', enum: ['new_with_tags', 'new_without_tags', 'very_good', 'good', 'satisfactory'] }, description: 'Item condition filter' },
       },
       required: ['query'],
     },
@@ -269,7 +275,7 @@ const PROMPTS = [
 
 function makeServer(sharedClient?: VintedClient): Server {
   const server = new Server(
-    { name: 'vinted-cli', version: '1.6.0' },
+    { name: 'vinted-cli', version: '1.6.1' },
     { capabilities: { tools: {}, prompts: {} } },
   );
 
@@ -355,7 +361,15 @@ function makeServer(sharedClient?: VintedClient): Server {
         case 'get_item': result = await opGetItem(c, a as any); break;
         case 'get_seller': result = await opGetSeller(c, a as any); break;
         case 'get_seller_items': result = await opSellerItems(c, a as any); break;
-        case 'compare_prices': result = await opCompare(c, a as any); break;
+        case 'compare_prices': {
+          const args = a as any;
+          if (!args.brandIds && Array.isArray(args.brand) && args.brand.length) {
+            const r = await resolveBrandIds(c, args.brand, args.countries?.[0] ?? 'fr');
+            args.brandIds = r.ids.length ? r.ids : undefined;
+          }
+          result = await opCompare(c, args);
+          break;
+        }
         case 'get_trending': result = await opTrending(c, a as any); break;
         case 'get_categories': result = await opCategories(c, a as any); break;
         case 'search_all_items': {

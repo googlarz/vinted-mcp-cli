@@ -5,17 +5,24 @@ startCommand:
     properties:
       proxyUrl:
         type: string
-        description: Optional HTTP proxy URL (e.g. http://proxy:8080) — recommended for high-volume use
-      country:
-        type: string
-        description: Vinted country domain to use (e.g. de, fr, pl, uk). Defaults to de.
-        default: "de"
+        title: Proxy URL
+        description: >
+          HTTP/HTTPS proxy URL for countries where Vinted blocks direct connections
+          (e.g. some residential IPs). Also readable from the VINTED_PROXY_URL env var.
+      cacheTtlMs:
+        type: number
+        title: Cache TTL (ms)
+        description: >
+          How long to cache API responses in memory (milliseconds). Default 60000 (1 min).
+          Set to 0 to disable caching. Static catalogues (colors, sizes, categories) are
+          always cached for 1 hour regardless of this setting.
+    additionalProperties: false
   commandFunction: |-
     (config) => ({
       command: "npx",
       args: ["-y", "@googlarz/vinted-client/mcp"],
       env: {
         ...(config.proxyUrl ? { VINTED_PROXY_URL: config.proxyUrl } : {}),
-        ...(config.country ? { VINTED_COUNTRY: config.country } : {})
+        ...(config.cacheTtlMs !== undefined ? { VINTED_CACHE_TTL_MS: String(config.cacheTtlMs) } : {}),
       }
     })
