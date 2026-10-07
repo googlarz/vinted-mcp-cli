@@ -5,6 +5,14 @@
     "access": "public"
   },
   "description": "CLI and MCP server for the Vinted marketplace — search, items, sellers, price compare, trending.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/googlarz/vinted-mcp-cli.git"
+  },
+  "homepage": "https://github.com/googlarz/vinted-mcp-cli#readme",
+  "bugs": {
+    "url": "https://github.com/googlarz/vinted-mcp-cli/issues"
+  },
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
